@@ -88,32 +88,86 @@ def process_csv_data(input_path: str) -> DataFrame:
 
 def create_text_content(row: Dict[str, Any]) -> str:
     """
-    Create text content for embedding generation
-    Customize this based on your CSV structure
+    Create text content for embedding generation optimized for e-commerce semantic search
     """
-    # Example: Combine relevant fields for e-commerce data
     text_parts = []
 
-    # Add product name if exists
-    if 'product_name' in row and row['product_name']:
-        text_parts.append(f"Product: {row['product_name']}")
+    # Primary fields - most important for search
+    if 'title' in row and row['title']:
+        text_parts.append(f"Product: {row['title']}")
 
-    # Add description if exists
     if 'description' in row and row['description']:
         text_parts.append(f"Description: {row['description']}")
 
-    # Add category if exists
-    if 'category' in row and row['category']:
-        text_parts.append(f"Category: {row['category']}")
+    if 'brand' in row and row['brand']:
+        text_parts.append(f"Brand: {row['brand']}")
 
-    # Add price if exists
-    if 'price' in row and row['price']:
-        text_parts.append(f"Price: ${row['price']}")
+    if 'categories' in row and row['categories']:
+        # Categories might be a list or string
+        categories = row['categories']
+        if isinstance(categories, str):
+            text_parts.append(f"Categories: {categories}")
+        else:
+            text_parts.append(f"Categories: {', '.join(str(c) for c in categories)}")
 
-    # Add any other relevant fields
-    for key, value in row.items():
-        if key not in ['product_name', 'description', 'category', 'price'] and value:
-            text_parts.append(f"{key}: {value}")
+    if 'features' in row and row['features']:
+        features = row['features']
+        if isinstance(features, str):
+            text_parts.append(f"Features: {features}")
+        else:
+            text_parts.append(f"Features: {', '.join(str(f) for f in features)}")
+
+    # Secondary fields - additional context
+    if 'department' in row and row['department']:
+        text_parts.append(f"Department: {row['department']}")
+
+    if 'manufacturer' in row and row['manufacturer']:
+        text_parts.append(f"Manufacturer: {row['manufacturer']}")
+
+    if 'product_details' in row and row['product_details']:
+        text_parts.append(f"Details: {row['product_details']}")
+
+    if 'variations' in row and row['variations']:
+        text_parts.append(f"Variations: {row['variations']}")
+
+    # Context fields - enrich with signals
+    if 'rating' in row and row['rating']:
+        try:
+            rating = float(row['rating'])
+            if rating >= 4.5:
+                text_parts.append("Highly rated product")
+            elif rating >= 4.0:
+                text_parts.append("Well rated product")
+        except:
+            pass
+
+    if 'reviews_count' in row and row['reviews_count']:
+        try:
+            reviews = int(row['reviews_count'])
+            if reviews > 1000:
+                text_parts.append("Popular product with many reviews")
+            elif reviews > 100:
+                text_parts.append("Well-reviewed product")
+        except:
+            pass
+
+    if 'availability' in row and row['availability']:
+        if 'in stock' in str(row['availability']).lower():
+            text_parts.append("Currently available")
+
+    if 'discount' in row and row['discount']:
+        try:
+            discount = float(str(row['discount']).replace('%', ''))
+            if discount >= 50:
+                text_parts.append("Significant discount available")
+            elif discount >= 20:
+                text_parts.append("On sale")
+        except:
+            pass
+
+    # Price range information
+    if 'final_price' in row and row['final_price']:
+        text_parts.append(f"Price: {row['final_price']} {row.get('currency', 'USD')}")
 
     return " | ".join(text_parts)
 
@@ -181,13 +235,35 @@ def main():
                 embeddings = generate_embeddings(text_content)
 
                 if embeddings:
+                    # Extract metadata for filtering in vector search
+                    metadata = {
+                        "asin": row.get('asin', ''),
+                        "brand": row.get('brand', ''),
+                        "seller_name": row.get('seller_name', ''),
+                        "categories": row.get('categories', ''),
+                        "department": row.get('department', ''),
+                        "rating": float(row.get('rating', 0)) if row.get('rating') else 0,
+                        "reviews_count": int(row.get('reviews_count', 0)) if row.get('reviews_count') else 0,
+                        "final_price": float(row.get('final_price', 0)) if row.get('final_price') else 0,
+                        "currency": row.get('currency', 'USD'),
+                        "availability": row.get('availability', ''),
+                        "discount": row.get('discount', ''),
+                        "is_available": row.get('is_available', False),
+                        "bought_past_month": int(row.get('bought_past_month', 0)) if row.get('bought_past_month') else 0,
+                        "timestamp": row.get('timestamp', ''),
+                    }
+
                     # Create processed record
                     processed_record = {
-                        "id": f"record_{index}",
-                        "original_data": row.to_dict(),
+                        "id": row.get('asin', f"record_{index}"),  # Use ASIN as ID if available
+                        "title": row.get('title', ''),
+                        "url": row.get('url', ''),
+                        "image_url": row.get('image_url', ''),
                         "text_content": text_content,
                         "embeddings": embeddings,
-                        "embedding_dimension": len(embeddings)
+                        "embedding_dimension": len(embeddings),
+                        "metadata": metadata,
+                        "original_data": row.to_dict()
                     }
                     processed_records.append(processed_record)
 
