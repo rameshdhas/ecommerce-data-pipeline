@@ -9,13 +9,17 @@ An AWS CDK project that creates a serverless data pipeline for processing CSV fi
 3. **Glue Job**: Lambda starts a Glue ETL job to process the CSV
 4. **LLM Integration**: Glue job calls AWS Bedrock to generate vector embeddings
 5. **Vector Storage**: Processed data with embeddings is stored in a vector database
+6. **Scheduled Processing**: EventBridge scheduler runs the pipeline daily at 2 AM UTC
 
 ## Components
 
 - **Data Bucket**: S3 bucket for CSV file uploads
 - **Scripts Bucket**: S3 bucket for Glue job scripts
-- **Lambda Function**: Triggers Glue job on CSV upload
+- **Lambda Functions**:
+  - Real-time trigger for individual CSV uploads
+  - Scheduled batch processor for daily runs
 - **Glue Job**: Processes CSV data and generates embeddings
+- **EventBridge Scheduler**: Triggers daily processing at 2 AM UTC
 - **IAM Roles**: Proper permissions for all services
 
 ## Prerequisites
@@ -48,17 +52,31 @@ An AWS CDK project that creates a serverless data pipeline for processing CSV fi
 
 ## Usage
 
+### Real-time Processing
 1. After deployment, upload the Glue script to the scripts bucket:
    ```bash
    aws s3 cp glue-jobs/data_processing_job.py s3://[scripts-bucket-name]/
    ```
 
-2. Upload a CSV file to the data bucket to trigger the pipeline:
+2. Upload a CSV file to the data bucket to trigger immediate processing:
    ```bash
    aws s3 cp your-data.csv s3://[data-bucket-name]/
    ```
 
-3. Monitor the Glue job execution in the AWS Glue console
+### Scheduled Batch Processing
+The pipeline automatically runs daily at 2 AM UTC to process files from the previous day. To use scheduled processing:
+
+1. Upload CSV files to the daily folder structure:
+   ```bash
+   aws s3 cp your-data.csv s3://[data-bucket-name]/daily-uploads/YYYY/MM/DD/
+   ```
+
+2. Files will be automatically processed during the next scheduled run
+
+### Monitoring
+- Monitor real-time and scheduled Glue job executions in the AWS Glue console
+- Check CloudWatch Logs for Lambda function and Glue job logs
+- Review EventBridge rule metrics for scheduled execution status
 
 ## Configuration
 

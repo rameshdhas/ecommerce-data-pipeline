@@ -4,6 +4,9 @@ import * as glue from 'aws-cdk-lib/aws-glue';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as path from 'path';
 import { Construct } from 'constructs';
 
 export class EcommerceDataPipelineStack extends cdk.Stack {
@@ -72,39 +75,8 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
     // Lambda function to trigger Glue job on S3 upload
     const triggerFunction = new lambda.Function(this, 'TriggerGlueJob', {
       runtime: lambda.Runtime.PYTHON_3_9,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import boto3
-
-glue_client = boto3.client('glue')
-
-def handler(event, context):
-    # Parse S3 event
-    for record in event['Records']:
-        bucket = record['s3']['bucket']['name']
-        key = record['s3']['object']['key']
-
-        # Only process CSV files
-        if key.endswith('.csv'):
-            try:
-                # Start Glue job
-                response = glue_client.start_job_run(
-                    JobName='${glueJob.name}',
-                    Arguments={
-                        '--input-path': f's3://{bucket}/{key}'
-                    }
-                )
-                print(f"Started Glue job {response['JobRunId']} for {key}")
-            except Exception as e:
-                print(f"Error starting Glue job: {str(e)}")
-                raise
-
-    return {
-        'statusCode': 200,
-        'body': json.dumps('Successfully triggered Glue job')
-    }
-      `),
+      handler: 'trigger-glue-job.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, 'functions')),
       environment: {
         'GLUE_JOB_NAME': glueJob.name || 'ecommerce-data-processing',
       },
@@ -126,6 +98,79 @@ def handler(event, context):
       { suffix: '.csv' }
     );
 
+    // Lambda function to process scheduled batch jobs
+    const scheduledProcessFunction = new lambda.Function(this, 'ScheduledBatchProcessor', {
+      runtime: lambda.Runtime.PYTHON_3_9,
+      handler: 'scheduled-batch-processor.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, 'functions')),
+      environment: {
+        'DATA_BUCKET': dataBucket.bucketName,
+        'GLUE_JOB_NAME': glueJob.name || 'ecommerce-data-processing',
+      },
+      timeout: cdk.Duration.minutes(5),
+    });
+
+    // Grant permissions to scheduled Lambda
+    dataBucket.grantRead(scheduledProcessFunction);
+    scheduledProcessFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['glue:StartJobRun'],
+      resources: [
+        `arn:aws:glue:${this.region}:${this.account}:job/${glueJob.name}`,
+      ],
+    }));
+
+    // EventBridge rule to run daily at 2 AM UTC
+    const dailyScheduleRule = new events.Rule(this, 'DailyPipelineSchedule', {
+      schedule: events.Schedule.cron({
+        minute: '0',
+        hour: '2',
+        day: '*',
+        month: '*',
+        year: '*'
+      }),
+      description: 'Trigger data pipeline daily at 2 AM UTC',
+    });
+
+    // Add Lambda as target for the EventBridge rule
+    dailyScheduleRule.addTarget(new targets.LambdaFunction(scheduledProcessFunction));
+
+    // Alternative: Direct Glue job scheduling (without Lambda)
+    const directGlueScheduleRule = new events.Rule(this, 'DirectGlueJobSchedule', {
+      schedule: events.Schedule.cron({
+        minute: '30',
+        hour: '2',
+        day: '*',
+        month: '*',
+        year: '*'
+      }),
+      description: 'Directly trigger Glue job daily at 2:30 AM UTC',
+      enabled: false, // Disabled by default, enable if you prefer direct Glue triggering
+    });
+
+    // Create a Lambda to process all files in the bucket (for direct Glue scheduling)
+    const processAllFilesFunction = new lambda.Function(this, 'ProcessAllFiles', {
+      runtime: lambda.Runtime.PYTHON_3_9,
+      handler: 'process-all-files.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, 'functions')),
+      environment: {
+        'DATA_BUCKET': dataBucket.bucketName,
+        'GLUE_JOB_NAME': glueJob.name || 'ecommerce-data-processing',
+      },
+      timeout: cdk.Duration.minutes(5),
+    });
+
+    dataBucket.grantRead(processAllFilesFunction);
+    processAllFilesFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['glue:StartJobRun'],
+      resources: [
+        `arn:aws:glue:${this.region}:${this.account}:job/${glueJob.name}`,
+      ],
+    }));
+
+    directGlueScheduleRule.addTarget(new targets.LambdaFunction(processAllFilesFunction));
+
     // Outputs
     new cdk.CfnOutput(this, 'DataBucketName', {
       value: dataBucket.bucketName,
@@ -140,6 +185,16 @@ def handler(event, context):
     new cdk.CfnOutput(this, 'GlueJobName', {
       value: glueJob.name || 'ecommerce-data-processing',
       description: 'Glue job name for data processing',
+    });
+
+    new cdk.CfnOutput(this, 'DailyScheduleTime', {
+      value: '2:00 AM UTC',
+      description: 'Daily pipeline execution time',
+    });
+
+    new cdk.CfnOutput(this, 'ScheduledLambdaFunction', {
+      value: scheduledProcessFunction.functionName,
+      description: 'Lambda function for scheduled batch processing',
     });
   }
 }
