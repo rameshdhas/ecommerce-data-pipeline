@@ -17,17 +17,31 @@ glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 
-# Get job arguments
-args = getResolvedOptions(sys.argv, [
-    'JOB_NAME',
-    'input-path',
-    'data-bucket'
-])
+# Get required job arguments
+required_args = ['JOB_NAME', 'data_bucket']
+optional_args = ['input_path', 'batch_mode']
+
+# Get required arguments
+args = getResolvedOptions(sys.argv, required_args)
+
+# Try to get optional arguments
+for opt_arg in optional_args:
+    try:
+        opt_args = getResolvedOptions(sys.argv, [opt_arg])
+        args[opt_arg] = opt_args[opt_arg]
+    except:
+        args[opt_arg] = None
 
 job.init(args['JOB_NAME'], args)
 
+# Debug: Print the arguments received
+print(f"Job initialized with arguments: {args}")
+print(f"Data bucket: {args.get('data_bucket', 'NOT FOUND')}")
+
 # Initialize AWS clients
-bedrock_client = boto3.client('bedrock-runtime')
+# Bedrock Runtime is available in specific regions
+bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
+# Use the default region for S3 operations
 s3_client = boto3.client('s3')
 
 def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1") -> List[float]:
@@ -171,7 +185,7 @@ def create_text_content(row: Dict[str, Any]) -> str:
 
     return " | ".join(text_parts)
 
-def save_to_vector_store(processed_data: List[Dict[str, Any]], output_path: str):
+def save_to_vector_store(processed_data: List[Dict[str, Any]]):
     """
     Save processed data with embeddings to vector database
     This is a placeholder - replace with your vector database implementation
@@ -185,8 +199,10 @@ def save_to_vector_store(processed_data: List[Dict[str, Any]], output_path: str)
         }
 
         # Save to S3 as JSON (replace with vector database)
-        bucket = args['data-bucket']
+        bucket = args['data_bucket']
         key = f"processed-data/{pd.Timestamp.now().strftime('%Y/%m/%d')}/embeddings_{pd.Timestamp.now().strftime('%H%M%S')}.json"
+
+        print(f"Attempting to save {len(processed_data)} records to s3://{bucket}/{key}")
 
         s3_client.put_object(
             Bucket=bucket,
@@ -195,7 +211,7 @@ def save_to_vector_store(processed_data: List[Dict[str, Any]], output_path: str)
             ContentType='application/json'
         )
 
-        print(f"Saved processed data to s3://{bucket}/{key}")
+        print(f"Successfully saved processed data to s3://{bucket}/{key}")
 
         # TODO: Replace this with actual vector database insertion
         # Examples:
@@ -207,14 +223,41 @@ def save_to_vector_store(processed_data: List[Dict[str, Any]], output_path: str)
 
     except Exception as e:
         print(f"Error saving to vector store: {str(e)}")
+        print(f"Bucket: {bucket}, Key: {key}")
         raise
 
 def main():
     """
     Main processing logic
     """
-    input_path = args['input-path']
-    print(f"Starting data processing job for: {input_path}")
+    # Check if input_path is provided
+    input_path = args.get('input_path')
+
+    if not input_path:
+        # If no input path provided, process all CSV files in the data bucket
+        bucket_name = args['data_bucket']
+        print(f"No specific input path provided. Processing all CSV files in bucket: {bucket_name}")
+
+        # List all CSV files in the bucket
+        try:
+            response = s3_client.list_objects_v2(Bucket=bucket_name)
+            if 'Contents' in response:
+                csv_files = [obj['Key'] for obj in response['Contents'] if obj['Key'].endswith('.csv')]
+                if csv_files:
+                    # Process the first CSV file found (or you could process all)
+                    input_path = f"s3://{bucket_name}/{csv_files[0]}"
+                    print(f"Found {len(csv_files)} CSV files. Processing: {input_path}")
+                else:
+                    print("No CSV files found in the bucket")
+                    return
+            else:
+                print("Bucket is empty")
+                return
+        except Exception as e:
+            print(f"Error listing bucket contents: {str(e)}")
+            return
+    else:
+        print(f"Starting data processing job for: {input_path}")
 
     # Read and process CSV data
     df = process_csv_data(input_path)
@@ -278,8 +321,7 @@ def main():
 
     # Save to vector store
     if processed_records:
-        output_path = f"s3://{args['data-bucket']}/processed-data/"
-        save_to_vector_store(processed_records, output_path)
+        save_to_vector_store(processed_records)
 
     print("Data processing job completed successfully!")
 

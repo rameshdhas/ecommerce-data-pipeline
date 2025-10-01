@@ -19,7 +19,8 @@ def handler(event, context):
                 response = glue_client.start_job_run(
                     JobName=glue_job_name,
                     Arguments={
-                        '--input-path': f's3://{bucket}/{key}'
+                        '--input-path': f's3://{bucket}/{key}',
+                        '--data_bucket': bucket
                     }
                 )
                 print(f"Started Glue job {response['JobRunId']} for {key}")
