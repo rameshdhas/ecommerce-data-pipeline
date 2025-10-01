@@ -3,46 +3,46 @@
 ```mermaid
 graph TB
     %% Data Input
-    CSV[📄 CSV Files<br/>E-commerce Data] --> S3_DATA[🗄️ S3 Data Bucket<br/>ecommerce-data-pipeline-{account}-{region}]
+    CSV["📄 CSV Files<br/>E-commerce Data"] --> S3_DATA["🗄️ S3 Data Bucket<br/>ecommerce-data-pipeline"]
 
     %% Real-time Processing Path
-    S3_DATA --> |S3 Event<br/>Object Created| LAMBDA_TRIGGER[⚡ Lambda Function<br/>TriggerGlueJob]
+    S3_DATA --> |"S3 Event<br/>Object Created"| LAMBDA_TRIGGER["⚡ Lambda Function<br/>TriggerGlueJob"]
 
     %% Scheduled Processing Path
-    EVENTBRIDGE[⏰ EventBridge<br/>Daily at 2:00 AM UTC] --> LAMBDA_SCHEDULED[⚡ Lambda Function<br/>ScheduledBatchProcessor]
-    LAMBDA_SCHEDULED --> |List & Process<br/>CSV Files| S3_DATA
+    EVENTBRIDGE["⏰ EventBridge<br/>Daily at 2:00 AM UTC"] --> LAMBDA_SCHEDULED["⚡ Lambda Function<br/>ScheduledBatchProcessor"]
+    LAMBDA_SCHEDULED --> |"List & Process<br/>CSV Files"| S3_DATA
 
     %% Alternative Direct Scheduling (Disabled by default)
-    EVENTBRIDGE_DIRECT[⏰ EventBridge<br/>Direct Glue Trigger<br/>2:30 AM UTC<br/><i>Disabled</i>] -.-> |Alternative Path| LAMBDA_PROCESS_ALL[⚡ Lambda Function<br/>ProcessAllFiles]
+    EVENTBRIDGE_DIRECT["⏰ EventBridge<br/>Direct Glue Trigger<br/>2:30 AM UTC<br/>Disabled"] -.-> |"Alternative Path"| LAMBDA_PROCESS_ALL["⚡ Lambda Function<br/>ProcessAllFiles"]
     LAMBDA_PROCESS_ALL -.-> S3_DATA
 
     %% Glue Job Processing
-    LAMBDA_TRIGGER --> |StartJobRun| GLUE_JOB[🔧 AWS Glue Job<br/>DataProcessingJob<br/>Python ETL]
+    LAMBDA_TRIGGER --> |StartJobRun| GLUE_JOB["🔧 AWS Glue Job<br/>DataProcessingJob<br/>Python ETL"]
     LAMBDA_SCHEDULED --> |StartJobRun| GLUE_JOB
     LAMBDA_PROCESS_ALL -.-> |StartJobRun| GLUE_JOB
 
     %% Glue Job Components
-    S3_SCRIPTS[🗄️ S3 Scripts Bucket<br/>ecommerce-glue-scripts-{account}-{region}] --> |Script Location| GLUE_JOB
+    S3_SCRIPTS["🗄️ S3 Scripts Bucket<br/>ecommerce-glue-scripts"] --> |"Script Location"| GLUE_JOB
 
     %% Data Processing within Glue Job
-    GLUE_JOB --> |Read CSV Data| SPARK[⚙️ Apache Spark<br/>Data Processing]
-    SPARK --> |Extract Text Content| TEXT_PROCESSING[📝 Text Content Creation<br/>Product + Description + Features]
-    TEXT_PROCESSING --> |Generate Embeddings| BEDROCK[🤖 Amazon Bedrock<br/>Titan Embed Text v1<br/>1536-dimensional vectors]
+    GLUE_JOB --> |"Read CSV Data"| SPARK["⚙️ Apache Spark<br/>Data Processing"]
+    SPARK --> |"Extract Text Content"| TEXT_PROCESSING["📝 Text Content Creation<br/>Product + Description + Features"]
+    TEXT_PROCESSING --> |"Generate Embeddings"| BEDROCK["🤖 Amazon Bedrock<br/>Titan Embed Text v1<br/>1536-dimensional vectors"]
 
     %% Output Storage
-    BEDROCK --> |Vector Embeddings| VECTOR_STORE[🗄️ S3 JSON Storage<br/>processed-data/{date}/embeddings_{time}.json]
+    BEDROCK --> |"Vector Embeddings"| VECTOR_STORE["🗄️ S3 JSON Storage<br/>processed-data/date/embeddings"]
 
     %% Future Vector Database (Placeholder)
-    VECTOR_STORE -.-> |Future Migration| VECTOR_DB[🔍 Vector Database<br/><i>OpenSearch/Pinecone/Weaviate</i>]
+    VECTOR_STORE -.-> |"Future Migration"| VECTOR_DB["🔍 Vector Database<br/>OpenSearch/Pinecone/Weaviate"]
 
     %% IAM Roles and Permissions
-    GLUE_ROLE[🔐 IAM Role<br/>GlueJobRole] --> |Permissions| GLUE_JOB
+    GLUE_ROLE["🔐 IAM Role<br/>GlueJobRole"] --> |Permissions| GLUE_JOB
     GLUE_ROLE --> |ReadWrite| S3_DATA
     GLUE_ROLE --> |Read| S3_SCRIPTS
     GLUE_ROLE --> |InvokeModel| BEDROCK
 
     %% Monitoring and Logs
-    GLUE_JOB --> |Job Logs| CLOUDWATCH[📊 CloudWatch Logs<br/>Monitoring & Debugging]
+    GLUE_JOB --> |"Job Logs"| CLOUDWATCH["📊 CloudWatch Logs<br/>Monitoring & Debugging"]
     LAMBDA_TRIGGER --> CLOUDWATCH
     LAMBDA_SCHEDULED --> CLOUDWATCH
 
