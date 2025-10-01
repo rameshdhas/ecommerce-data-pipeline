@@ -29,7 +29,8 @@ def handler(event, context):
                 JobName=glue_job_name,
                 Arguments={
                     '--input-path': f's3://{bucket_name}/',
-                    '--batch-mode': 'true'
+                    '--batch-mode': 'true',
+                    '--data_bucket': bucket_name
                 }
             )
             print(f"Started batch Glue job {response['JobRunId']} for {csv_count} CSV files")

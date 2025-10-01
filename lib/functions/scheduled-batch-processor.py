@@ -39,7 +39,8 @@ def handler(event, context):
             glue_response = glue_client.start_job_run(
                 JobName=glue_job_name,
                 Arguments={
-                    '--input-path': f's3://{bucket_name}/{csv_file}'
+                    '--input-path': f's3://{bucket_name}/{csv_file}',
+                    '--data_bucket': bucket_name
                 }
             )
             print(f"Started Glue job {glue_response['JobRunId']} for {csv_file}")
