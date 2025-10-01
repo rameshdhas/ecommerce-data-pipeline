@@ -19,7 +19,7 @@ def handler(event, context):
                 response = glue_client.start_job_run(
                     JobName=glue_job_name,
                     Arguments={
-                        '--input-path': f's3://{bucket}/{key}',
+                        '--input_path': f's3://{bucket}/{key}',
                         '--data_bucket': bucket
                     }
                 )
