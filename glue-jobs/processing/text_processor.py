@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import pandas as pd
 from shared.utils import safe_float, safe_int
 
 
@@ -9,41 +10,45 @@ def create_text_content(row: Dict[str, Any]) -> str:
     text_parts = []
 
     # Primary fields - most important for search
-    if 'title' in row and row['title']:
+    if 'title' in row and row['title'] and not pd.isna(row['title']):
         text_parts.append(f"Product: {row['title']}")
 
-    if 'description' in row and row['description']:
+    if 'description' in row and row['description'] and not pd.isna(row['description']):
         text_parts.append(f"Description: {row['description']}")
 
-    if 'brand' in row and row['brand']:
+    if 'brand' in row and row['brand'] and not pd.isna(row['brand']):
         text_parts.append(f"Brand: {row['brand']}")
 
-    if 'categories' in row and row['categories']:
+    if 'categories' in row and row['categories'] and not pd.isna(row['categories']):
         # Categories might be a list or string
         categories = row['categories']
         if isinstance(categories, str):
             text_parts.append(f"Categories: {categories}")
-        else:
+        elif isinstance(categories, (list, tuple)):
             text_parts.append(f"Categories: {', '.join(str(c) for c in categories)}")
+        else:
+            text_parts.append(f"Categories: {str(categories)}")
 
-    if 'features' in row and row['features']:
+    if 'features' in row and row['features'] and not pd.isna(row['features']):
         features = row['features']
         if isinstance(features, str):
             text_parts.append(f"Features: {features}")
-        else:
+        elif isinstance(features, (list, tuple)):
             text_parts.append(f"Features: {', '.join(str(f) for f in features)}")
+        else:
+            text_parts.append(f"Features: {str(features)}")
 
     # Secondary fields - additional context
-    if 'department' in row and row['department']:
+    if 'department' in row and row['department'] and not pd.isna(row['department']):
         text_parts.append(f"Department: {row['department']}")
 
-    if 'manufacturer' in row and row['manufacturer']:
+    if 'manufacturer' in row and row['manufacturer'] and not pd.isna(row['manufacturer']):
         text_parts.append(f"Manufacturer: {row['manufacturer']}")
 
-    if 'product_details' in row and row['product_details']:
+    if 'product_details' in row and row['product_details'] and not pd.isna(row['product_details']):
         text_parts.append(f"Details: {row['product_details']}")
 
-    if 'variations' in row and row['variations']:
+    if 'variations' in row and row['variations'] and not pd.isna(row['variations']):
         text_parts.append(f"Variations: {row['variations']}")
 
     # Context fields - enrich with signals
