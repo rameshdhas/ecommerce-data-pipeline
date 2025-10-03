@@ -40,16 +40,13 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
     dataBucket.grantReadWrite(glueRole);
     scriptsBucket.grantRead(glueRole);
 
-    // Add permissions for LLM endpoint (Bedrock/SageMaker) and Rekognition
+    // Add permissions for LLM endpoint (Bedrock/SageMaker)
     glueRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
         'sagemaker:InvokeEndpoint',
-        'rekognition:DetectLabels',
-        'rekognition:DetectModerationLabels',
-        'rekognition:DetectText',
       ],
       resources: ['*'],
     }));
@@ -72,7 +69,7 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
         '--elasticsearch_endpoint': 'elasticsearch_endpoint',
         '--elasticsearch_api_key': 'elasticsearch_api_key',
         '--embedding_model': 'amazon.titan-embed-text-v1',
-        '--additional-python-modules': 'boto3>=1.34.0,requests,numpy,Pillow',
+        '--additional-python-modules': 'boto3>=1.34.0,requests',
       },
       maxRetries: 0,
       timeout: 60,
