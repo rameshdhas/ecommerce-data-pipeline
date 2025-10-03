@@ -4,6 +4,8 @@ import pandas as pd
 import json
 import requests
 import os
+import base64
+import io
 from datetime import datetime
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
@@ -12,7 +14,11 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import DataFrame
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from PIL import Image
+import numpy as np
+from urllib.parse import urlparse
+import colorsys
 
 # Initialize Glue context
 sc = SparkContext()
@@ -46,6 +52,9 @@ print(f"Data bucket: {args.get('data_bucket', 'NOT FOUND')}")
 bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
 # Use the default region for S3 operations
 s3_client = boto3.client('s3')
+# Disable Rekognition for now - focusing on PIL-based color extraction which is more reliable
+print("Rekognition disabled - using PIL color extraction only")
+rekognition_client = None
 
 def safe_float(value, default=0.0):
     """Safely convert a value to float, handling quoted strings and nulls"""
@@ -70,6 +79,244 @@ def safe_int(value, default=0):
         return int(float(value))  # Convert to float first to handle decimal strings
     except (ValueError, TypeError):
         return default
+
+def download_image_from_url(image_url: str, max_size: int = 5242880) -> Optional[bytes]:
+    """
+    Download image from URL with size limit (default 5MB)
+    """
+    try:
+        # Add headers to appear as a browser request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        response = requests.get(image_url, timeout=10, stream=True, headers=headers)
+        response.raise_for_status()
+
+        # Check if content type is an image
+        content_type = response.headers.get('content-type', '').lower()
+        if not any(img_type in content_type for img_type in ['image/', 'jpeg', 'jpg', 'png', 'gif', 'webp']):
+            print(f"Invalid content type for image URL: {content_type}")
+            return None
+
+        # Check content length
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size:
+            print(f"Image too large: {content_length} bytes")
+            return None
+
+        image_data = response.content
+        if len(image_data) > max_size:
+            print(f"Image too large after download: {len(image_data)} bytes")
+            return None
+
+        # Validate that it's actually an image by checking magic bytes
+        if len(image_data) < 8:
+            print(f"Downloaded data too small to be an image: {len(image_data)} bytes")
+            return None
+
+        # Check for common image format signatures
+        is_valid_image = False
+        # JPEG
+        if image_data[:2] == b'\xff\xd8':
+            is_valid_image = True
+        # PNG
+        elif image_data[:8] == b'\x89\x50\x4e\x47\x0d\x0a\x1a\x0a':
+            is_valid_image = True
+        # GIF
+        elif image_data[:6] in [b'GIF87a', b'GIF89a']:
+            is_valid_image = True
+        # WebP
+        elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
+            is_valid_image = True
+        # BMP
+        elif image_data[:2] == b'BM':
+            is_valid_image = True
+
+        if not is_valid_image:
+            print(f"Downloaded data does not appear to be a valid image format")
+            # Print first few bytes for debugging
+            print(f"First 20 bytes: {image_data[:20] if len(image_data) >= 20 else image_data}")
+            return None
+
+        return image_data
+    except Exception as e:
+        print(f"Error downloading image from {image_url}: {str(e)}")
+        return None
+
+def analyze_image_with_rekognition(image_data: bytes) -> Dict[str, Any]:
+    """
+    Rekognition is disabled - return empty results
+    """
+    return {'labels': [], 'properties': []}
+
+def extract_dominant_colors_from_image(image_data: bytes, num_colors: int = 5) -> List[Dict[str, Any]]:
+    """
+    Extract dominant colors from image using PIL and clustering
+    """
+    try:
+        # Open image with PIL
+        image = Image.open(io.BytesIO(image_data))
+
+        # Convert to RGB if necessary
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        # Resize for faster processing
+        image.thumbnail((150, 150))
+
+        # Get pixels
+        pixels = np.array(image).reshape(-1, 3)
+
+        # Simple color quantization using numpy
+        # Group similar colors
+        unique_colors, counts = np.unique(
+            pixels // 32 * 32,  # Quantize to reduce color space
+            axis=0,
+            return_counts=True
+        )
+
+        # Sort by frequency
+        sorted_indices = np.argsort(counts)[::-1][:num_colors]
+        dominant_colors = []
+
+        for idx in sorted_indices:
+            rgb = unique_colors[idx]
+            count = counts[idx]
+            percentage = (count / len(pixels)) * 100
+
+            # Convert RGB to color name
+            color_name = get_color_name(rgb[0], rgb[1], rgb[2])
+
+            dominant_colors.append({
+                'name': color_name,
+                'rgb': rgb.tolist(),
+                'hex': '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2]),
+                'percentage': round(percentage, 2)
+            })
+
+        return dominant_colors
+    except Exception as e:
+        print(f"Error extracting colors from image: {str(e)}")
+        return []
+
+def get_color_name(r: int, g: int, b: int) -> str:
+    """
+    Convert RGB values to a color name
+    """
+    # Normalize RGB values
+    r, g, b = r/255.0, g/255.0, b/255.0
+
+    # Convert to HSV
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    h = h * 360
+
+    # Determine color name based on HSV values
+    if s < 0.1:  # Low saturation - grayscale
+        if v < 0.3:
+            return "black"
+        elif v < 0.7:
+            return "gray"
+        else:
+            return "white"
+    elif v < 0.3:  # Low value - dark colors
+        return "dark"
+    else:  # Chromatic colors
+        if h < 15 or h >= 345:
+            return "red"
+        elif h < 45:
+            return "orange"
+        elif h < 75:
+            return "yellow"
+        elif h < 150:
+            return "green"
+        elif h < 210:
+            return "cyan"
+        elif h < 270:
+            return "blue"
+        elif h < 330:
+            return "purple"
+        else:
+            return "pink"
+
+def analyze_product_image(image_url: str) -> Dict[str, Any]:
+    """
+    Comprehensive image analysis including colors, objects, and visual features
+    """
+    analysis_result = {
+        'colors': [],
+        'objects': [],
+        'attributes': [],
+        'dominant_color': None,
+        'color_palette': [],
+        'visual_description': ''
+    }
+
+    if not image_url:
+        return analysis_result
+
+    try:
+        # Download image
+        image_data = download_image_from_url(image_url)
+        if not image_data:
+            print(f"Could not download image from: {image_url}")
+            return analysis_result
+
+        # Extract dominant colors using PIL (this doesn't require Rekognition)
+        try:
+            dominant_colors = extract_dominant_colors_from_image(image_data)
+            if dominant_colors:
+                analysis_result['colors'] = [color['name'] for color in dominant_colors]
+                analysis_result['dominant_color'] = dominant_colors[0]['name']
+                analysis_result['color_palette'] = dominant_colors
+        except Exception as e:
+            print(f"Error extracting colors with PIL: {str(e)}")
+
+        # Skip Rekognition - using PIL color extraction only
+        print(f"Successfully extracted colors using PIL: {analysis_result.get('dominant_color', 'none')}")
+
+        # Generate visual description using color data
+        desc_parts = []
+        if analysis_result['dominant_color']:
+            desc_parts.append(analysis_result['dominant_color'])
+        if analysis_result['colors'] and len(analysis_result['colors']) > 1:
+            # Add other colors if different from dominant
+            other_colors = [c for c in analysis_result['colors'][:3] if c != analysis_result['dominant_color']]
+            desc_parts.extend(other_colors)
+
+        analysis_result['visual_description'] = ' '.join(desc_parts)
+
+    except Exception as e:
+        print(f"Error in analyze_product_image: {str(e)}")
+        # Return partial results if we have color data
+        if analysis_result.get('dominant_color'):
+            print(f"Returning partial analysis with color data: {analysis_result['dominant_color']}")
+
+    return analysis_result
+
+def generate_multimodal_embeddings(text: str, image_analysis: Dict[str, Any], model_id: str = "amazon.titan-embed-text-v1") -> List[float]:
+    """
+    Generate embeddings that combine text and visual features
+    """
+    # Enrich text with visual features
+    enriched_text_parts = [text]
+
+    if image_analysis.get('dominant_color'):
+        enriched_text_parts.append(f"Color: {image_analysis['dominant_color']}")
+
+    if image_analysis.get('colors'):
+        enriched_text_parts.append(f"Colors: {', '.join(image_analysis['colors'][:3])}")
+
+    if image_analysis.get('objects'):
+        enriched_text_parts.append(f"Visual features: {', '.join(image_analysis['objects'][:5])}")
+
+    if image_analysis.get('attributes'):
+        enriched_text_parts.append(f"Attributes: {', '.join(image_analysis['attributes'][:3])}")
+
+    enriched_text = ' | '.join(enriched_text_parts)
+
+    # Generate embeddings with the enriched text
+    return generate_embeddings(enriched_text, model_id)
 
 def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1") -> List[float]:
     """
@@ -104,23 +351,6 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
                 return generate_embeddings(text, "amazon.titan-embed-text-v1")
 
         # Amazon Titan models
-        elif model_id == "amazon.titan-embed-text-v2":
-            body = json.dumps({
-                "inputText": text,
-                "dimensions": 1024,
-                "normalize": True
-            })
-
-            response = bedrock_client.invoke_model(
-                modelId=model_id,
-                body=body,
-                contentType='application/json',
-                accept='application/json'
-            )
-
-            response_body = json.loads(response['body'].read())
-            return response_body['embedding']
-
         elif model_id == "amazon.titan-embed-text-v1":
             body = json.dumps({
                 "inputText": text
@@ -135,45 +365,6 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
 
             response_body = json.loads(response['body'].read())
             return response_body['embedding']
-
-        # Amazon Titan Image Embedding (for multimodal content)
-        elif model_id == "amazon.titan-embed-image-v1":
-            # This model can handle both text and images
-            body = json.dumps({
-                "inputText": text,
-                "embeddingConfig": {
-                    "outputEmbeddingLength": 1024
-                }
-            })
-
-            response = bedrock_client.invoke_model(
-                modelId=model_id,
-                body=body,
-                contentType='application/json',
-                accept='application/json'
-            )
-
-            response_body = json.loads(response['body'].read())
-            return response_body['embedding']
-
-        # Cohere models via Bedrock
-        elif model_id.startswith("cohere.embed"):
-            body = json.dumps({
-                "texts": [text],
-                "input_type": "search_document",
-                "embedding_types": ["float"]
-            })
-
-            response = bedrock_client.invoke_model(
-                modelId=model_id,
-                body=body,
-                contentType='application/json',
-                accept='application/json'
-            )
-
-            response_body = json.loads(response['body'].read())
-            return response_body['embeddings']['float'][0]
-
         else:
             # Default to Titan v2
             body = json.dumps({
@@ -390,7 +581,7 @@ def process_csv_data(input_path: str) -> DataFrame:
         print(f"Error reading CSV: {str(e)}")
         raise
 
-def create_text_content(row: Dict[str, Any]) -> str:
+def create_text_content(row: Dict[str, Any], image_analysis: Optional[Dict[str, Any]] = None) -> str:
     """
     Create text content for embedding generation optimized for e-commerce semantic search
     """
@@ -465,7 +656,50 @@ def create_text_content(row: Dict[str, Any]) -> str:
     if 'final_price' in row and row['final_price']:
         text_parts.append(f"Price: {row['final_price']} {row.get('currency', 'USD')}")
 
+    # Add visual features from image analysis
+    if image_analysis:
+        if image_analysis.get('dominant_color'):
+            text_parts.append(f"Primary color: {image_analysis['dominant_color']}")
+
+        if image_analysis.get('colors'):
+            text_parts.append(f"Available colors: {', '.join(image_analysis['colors'][:3])}")
+
+        if image_analysis.get('visual_description'):
+            text_parts.append(f"Visual: {image_analysis['visual_description']}")
+
     return " | ".join(text_parts)
+
+def extract_clean_description(row: Dict[str, Any]) -> str:
+    """
+    Extract a clean product description from the raw data.
+    This handles cases where the description field contains JSON or concatenated data.
+    """
+    description = row.get('description', '')
+
+    if not description:
+        return ''
+
+    # If description contains JSON-like structure, try to extract just the description part
+    if 'Description:' in description:
+        # Extract the description part from concatenated text
+        try:
+            # Find the Description: part and extract until the next field
+            desc_start = description.find('Description: ') + len('Description: ')
+            desc_end = description.find(' | ', desc_start)
+            if desc_end == -1:
+                desc_end = len(description)
+            return description[desc_start:desc_end].strip()
+        except Exception:
+            pass
+
+    # If it looks like JSON, try to parse it
+    if description.strip().startswith('{') or 'Product:' in description:
+        # This appears to be the concatenated product data, return empty for now
+        # The actual description should be extracted from the individual fields
+        return ''
+
+    # Otherwise return the description as-is
+    return description.strip()
 
 def get_embedding_dimensions(model_id: str) -> int:
     """
@@ -523,9 +757,20 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
                     "properties": {
                         "id": {"type": "keyword"},
                         "title": {"type": "text"},
+                        "description": {"type": "text"},
                         "url": {"type": "text"},
                         "image_url": {"type": "text"},
                         "text_content": {"type": "text"},
+                        "image_analysis": {
+                            "properties": {
+                                "dominant_color": {"type": "keyword"},
+                                "colors": {"type": "keyword"},
+                                "color_palette": {"type": "object"},
+                                "objects": {"type": "keyword"},
+                                "attributes": {"type": "keyword"},
+                                "visual_description": {"type": "text"}
+                            }
+                        },
                         "embeddings": {
                             "type": "dense_vector",
                             "dims": embedding_dims,  # Dynamic dimensions based on model
@@ -567,13 +812,15 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
             else:
                 print(f"Successfully created index: {index_name}")
 
-        # Bulk index documents
+        # Bulk index documents with batching to handle large payloads
         bulk_url = f"{es_endpoint}/_bulk"
-        bulk_data = []
 
         print(f"Total processed records to check: {len(processed_data)}")
         records_with_embeddings = 0
         records_without_embeddings = 0
+
+        # Prepare documents for indexing
+        documents_to_index = []
 
         for record in processed_data:
             # Only index records that have embeddings (non-empty list)
@@ -584,17 +831,16 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
                 doc = {
                     "id": record['id'],
                     "title": record['title'],
+                    "description": record.get('description', ''),
                     "url": record['url'],
                     "image_url": record['image_url'],
                     "text_content": record['text_content'],
+                    "image_analysis": record.get('image_analysis', {}),
                     "embeddings": record['embeddings'],
                     "metadata": record['metadata'],
                     "indexed_at": datetime.now().isoformat()
                 }
-
-                # Add bulk index action
-                bulk_data.append(json.dumps({"index": {"_index": index_name, "_id": record['id']}}))
-                bulk_data.append(json.dumps(doc))
+                documents_to_index.append(doc)
             else:
                 records_without_embeddings += 1
                 print(f"Skipping record {record.get('id', 'unknown')}: No embeddings or empty embeddings list")
@@ -604,56 +850,89 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
         print(f"Records with embeddings: {records_with_embeddings}")
         print(f"Records without embeddings: {records_without_embeddings}")
 
-        if bulk_data:
+        if not documents_to_index:
+            print("No documents with embeddings to index to Elasticsearch")
+            return False
+
+        # Batch size for bulk indexing - smaller batches to avoid payload size issues
+        batch_size = 50  # Process 50 documents per batch to keep request size manageable
+        total_batches = (len(documents_to_index) + batch_size - 1) // batch_size
+
+        print(f"Indexing {len(documents_to_index)} documents in {total_batches} batches of {batch_size} documents each...")
+
+        total_success_count = 0
+        total_error_count = 0
+
+        # Process documents in batches
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(documents_to_index))
+            batch_docs = documents_to_index[start_idx:end_idx]
+
+            # Prepare bulk data for this batch
+            bulk_data = []
+            for doc in batch_docs:
+                bulk_data.append(json.dumps({"index": {"_index": index_name, "_id": doc['id']}}))
+                bulk_data.append(json.dumps(doc))
+
             # Join with newlines and add final newline
             bulk_body = '\n'.join(bulk_data) + '\n'
 
-            print(f"Indexing {len(bulk_data)//2} documents to Elasticsearch...")
-            print(f"Bulk request size: {len(bulk_body)} bytes")
-            print(f"First bulk action: {bulk_data[0] if bulk_data else 'No data'}")
-            print(f"First document: {bulk_data[1] if len(bulk_data) > 1 else 'No document'}")
+            print(f"Processing batch {batch_num + 1}/{total_batches}: {len(batch_docs)} documents, {len(bulk_body)} bytes")
 
-            response = requests.post(
-                bulk_url,
-                headers=headers,
-                data=bulk_body
-            )
+            try:
+                response = requests.post(
+                    bulk_url,
+                    headers=headers,
+                    data=bulk_body,
+                    timeout=30  # Add timeout to prevent hanging
+                )
 
-            print(f"Elasticsearch response status: {response.status_code}")
+                print(f"Batch {batch_num + 1} response status: {response.status_code}")
 
-            if response.status_code == 200:
-                result = response.json()
-                print(f"Bulk response - Errors: {result.get('errors', 'N/A')}, Took: {result.get('took', 'N/A')}ms")
+                if response.status_code == 200:
+                    result = response.json()
+                    print(f"Batch {batch_num + 1} - Errors: {result.get('errors', 'N/A')}, Took: {result.get('took', 'N/A')}ms")
 
-                # Count successful and failed indexing
-                success_count = 0
-                error_count = 0
+                    # Count successful and failed indexing for this batch
+                    batch_success_count = 0
+                    batch_error_count = 0
 
-                for item in result.get('items', []):
-                    if 'index' in item:
-                        if item['index'].get('status') in [200, 201]:
-                            success_count += 1
-                        else:
-                            error_count += 1
-                            if 'error' in item['index']:
-                                error_detail = item['index']['error']
-                                print(f"Error indexing document {item['index'].get('_id', 'unknown')}: {error_detail}")
+                    for item in result.get('items', []):
+                        if 'index' in item:
+                            if item['index'].get('status') in [200, 201]:
+                                batch_success_count += 1
+                            else:
+                                batch_error_count += 1
+                                if 'error' in item['index']:
+                                    error_detail = item['index']['error']
+                                    print(f"Error indexing document {item['index'].get('_id', 'unknown')}: {error_detail}")
 
-                print(f"Indexing results - Success: {success_count}, Errors: {error_count}")
+                    total_success_count += batch_success_count
+                    total_error_count += batch_error_count
 
-                if not result.get('errors', True):
-                    print(f"Successfully indexed {len(bulk_data)//2} documents to Elasticsearch index: {index_name}")
-                    return True
+                    print(f"Batch {batch_num + 1} results - Success: {batch_success_count}, Errors: {batch_error_count}")
+
                 else:
-                    print(f"Bulk indexing completed with errors. Check logs above for details.")
-                    return False
-            else:
-                print(f"Error during bulk indexing: {response.status_code}")
-                print(f"Response headers: {response.headers}")
-                print(f"Response body: {response.text[:1000]}")  # First 1000 chars
-                return False
+                    print(f"Error in batch {batch_num + 1}: {response.status_code}")
+                    print(f"Response headers: {response.headers}")
+                    print(f"Response body: {response.text[:500]}")
+                    total_error_count += len(batch_docs)
+
+            except Exception as e:
+                print(f"Exception during batch {batch_num + 1} indexing: {str(e)}")
+                total_error_count += len(batch_docs)
+                continue
+
+        print(f"Final indexing results - Total Success: {total_success_count}, Total Errors: {total_error_count}")
+
+        # Return success if most documents were indexed successfully
+        success_rate = total_success_count / len(documents_to_index) if documents_to_index else 0
+        if success_rate >= 0.9:  # 90% success rate threshold
+            print(f"Successfully indexed {total_success_count}/{len(documents_to_index)} documents to Elasticsearch index: {index_name}")
+            return True
         else:
-            print("No documents with embeddings to index to Elasticsearch")
+            print(f"Bulk indexing completed with significant errors. Success rate: {success_rate:.2%}")
             return False
 
     except Exception as e:
@@ -753,12 +1032,36 @@ def main():
     # Process each row
     for index, row in pandas_df.iterrows():
         try:
-            # Create text content for embedding
-            text_content = create_text_content(row.to_dict())
+            # Analyze product image if available
+            image_analysis = {}
+            image_url = row.get('image_url', '')
+
+            if image_url:
+                # Only print for every 10th product to reduce logs
+                if (index + 1) % 10 == 0:
+                    print(f"Analyzing images... Progress: {index + 1}/{len(pandas_df)}")
+
+                image_analysis = analyze_product_image(image_url)
+
+                # Only print details if we successfully extracted colors
+                if image_analysis.get('dominant_color'):
+                    if (index + 1) % 10 == 0:
+                        print(f"  - Sample product {index + 1}: Dominant color: {image_analysis['dominant_color']}")
+                        if image_analysis.get('objects'):
+                            print(f"  - Objects: {', '.join(image_analysis['objects'][:3])}")
+
+            # Create text content for embedding (now includes image analysis)
+            text_content = create_text_content(row.to_dict(), image_analysis)
+
+            # Extract clean description
+            clean_description = extract_clean_description(row.to_dict())
 
             if text_content:
-                # Generate embeddings using the specified model
-                embeddings = generate_embeddings(text_content, model_id=embedding_model)
+                # Generate multimodal embeddings combining text and visual features
+                if image_analysis and image_analysis.get('visual_description'):
+                    embeddings = generate_multimodal_embeddings(text_content, image_analysis, model_id=embedding_model)
+                else:
+                    embeddings = generate_embeddings(text_content, model_id=embedding_model)
 
                 # For now, continue even if embeddings fail (store record without embeddings)
                 # This allows us to at least save the processed metadata
@@ -808,9 +1111,11 @@ def main():
                     processed_record = {
                         "id": row.get('asin', f"record_{index}"),  # Use ASIN as ID if available
                         "title": row.get('title', ''),
+                        "description": clean_description,
                         "url": row.get('url', ''),
                         "image_url": row.get('image_url', ''),
                         "text_content": text_content,
+                        "image_analysis": image_analysis,
                         "embeddings": embeddings if embeddings else [],
                         "embedding_dimension": len(embeddings) if embeddings else 0,
                         "has_embeddings": bool(embeddings),
