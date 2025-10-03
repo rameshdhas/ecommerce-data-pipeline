@@ -1,4 +1,5 @@
 import json
+import traceback
 from typing import List
 from shared.aws_clients import get_aws_clients
 from .chunking import generate_embeddings_with_chunking, summarize_with_claude
@@ -79,7 +80,6 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
         print(f"  - Text preview: {text[:100]}..." if len(text) > 100 else f"  - Text: {text}")
 
         # Print full traceback for debugging
-        import traceback
         print(f"ERROR traceback: {traceback.format_exc()}")
 
         # If model is invalid, try fallback to v1
@@ -99,40 +99,3 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
         return []
 
 
-def generate_embeddings_batch(texts: List[str], model_id: str = "amazon.titan-embed-text-v1", batch_size: int = 25) -> List[List[float]]:
-    """
-    Generate embeddings for multiple texts efficiently using batch processing.
-    Bedrock has limits, so we process in smaller batches.
-    """
-    if not texts:
-        return []
-
-    aws_clients = get_aws_clients()
-    all_embeddings = []
-
-    # Process texts in batches to respect API limits
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-        batch_embeddings = []
-
-        for text in batch_texts:
-            try:
-                if not text or not text.strip():
-                    batch_embeddings.append([])
-                    continue
-
-                # Use the existing single embedding function
-                embedding = generate_embeddings(text, model_id)
-                batch_embeddings.append(embedding)
-
-            except Exception as e:
-                print(f"Error generating embedding for text: {str(e)[:100]}")
-                batch_embeddings.append([])
-
-        all_embeddings.extend(batch_embeddings)
-
-        # Log progress for large batches
-        if len(texts) > 100:
-            print(f"Generated embeddings for batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
-
-    return all_embeddings

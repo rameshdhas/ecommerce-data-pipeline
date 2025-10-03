@@ -1,14 +1,9 @@
-import sys
 import pandas as pd
 from datetime import datetime
-from awsglue.transforms import *
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from pyspark.sql import functions as F
-from pyspark.sql.types import *
 from typing import List, Dict, Any
-import json
 
 # Import our modular components
 from shared.config import get_job_arguments
@@ -17,6 +12,8 @@ from shared.utils import safe_float, safe_int
 from embedding.generator import generate_embeddings
 from processing.csv_reader import process_csv_data
 from processing.text_processor import create_text_content, extract_clean_description
+from storage.s3_writer import save_to_s3_batch
+from storage.elasticsearch_writer import save_to_elasticsearch_batch
 
 # Initialize Glue context
 sc = SparkContext()
@@ -112,10 +109,8 @@ def process_record(row_dict: Dict[str, Any], index: int, embedding_model: str) -
         "image_url": row_dict.get('image_url', ''),
         "text_content": text_content,
         "embeddings": embeddings if embeddings else [],
-        "embedding_dimension": len(embeddings) if embeddings else 0,
         "has_embeddings": bool(embeddings),
-        "metadata": metadata,
-        "original_data": row_dict
+        "metadata": metadata
     }
 
     return processed_record
@@ -197,9 +192,6 @@ def save_batch_to_storage(batch_records, batch_number, embedding_model):
     """Save a batch of records to both S3 and Elasticsearch"""
     if not batch_records:
         return
-
-    from storage.s3_writer import save_to_s3_batch
-    from storage.elasticsearch_writer import save_to_elasticsearch_batch
 
     print(f"Saving batch {batch_number} with {len(batch_records)} records to storage...")
 

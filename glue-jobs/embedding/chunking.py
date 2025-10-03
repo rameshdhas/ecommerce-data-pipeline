@@ -1,4 +1,5 @@
 import json
+import numpy as np
 from typing import List
 from shared.aws_clients import get_aws_clients
 from .models import get_max_chunk_size
@@ -13,7 +14,7 @@ def summarize_with_claude(text: str, model_id: str = "anthropic.claude-3-haiku-2
         aws_clients = get_aws_clients()
 
         # Prepare the prompt for summarization
-        prompt = f"""Please summarize the following product information, keeping all important details for search and discovery.
+        prompt = f"""summarize the following product information, keeping all important details for search and discovery.
         Focus on: product name, brand, key features, categories, and specifications.
         Keep the summary under 5000 characters.
 
@@ -118,7 +119,8 @@ def generate_embeddings_with_chunking(text: str, model_id: str) -> List[float]:
         # Average the embeddings
         if all_embeddings:
             try:
-                import numpy as np
+                # Use numpy for averaging if available
+                pass
             except ImportError:
                 print("Warning: numpy not available, using manual averaging")
                 # Manual averaging fallback
