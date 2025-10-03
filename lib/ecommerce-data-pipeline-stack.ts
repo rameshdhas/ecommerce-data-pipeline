@@ -40,13 +40,16 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
     dataBucket.grantReadWrite(glueRole);
     scriptsBucket.grantRead(glueRole);
 
-    // Add permissions for LLM endpoint (Bedrock/SageMaker)
+    // Add permissions for LLM endpoint (Bedrock/SageMaker) and Rekognition
     glueRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
         'sagemaker:InvokeEndpoint',
+        'rekognition:DetectLabels',
+        'rekognition:DetectModerationLabels',
+        'rekognition:DetectText',
       ],
       resources: ['*'],
     }));
@@ -66,8 +69,8 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
         '--enable-metrics': '',
         '--enable-continuous-cloudwatch-log': 'true',
         '--data_bucket': dataBucket.bucketName,
-        '--elasticsearch_endpoint': 'https://ecommerce-project-a814cd.es.us-east-1.aws.elastic.cloud:443',
-        '--elasticsearch_api_key': 'alBSNG41a0JUamwwcHZqNnoxaUs6Q2I0Ym5iNE14TkRvNEtDUXcyZF83Zw==',
+        '--elasticsearch_endpoint': 'elasticsearch_endpoint',
+        '--elasticsearch_api_key': 'elasticsearch_api_key',
         // Amazon Bedrock Foundation Model options (no external API keys needed):
         // Text Embeddings:
         // - 'amazon.titan-embed-text-v2': 8192 tokens, 1024 dimensions (configurable 256/512/1024)
@@ -80,7 +83,7 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
         // - 'anthropic.claude-3-haiku-20240307': 200K tokens (summarizes then uses Titan for embeddings)
         // - 'anthropic.claude-3-sonnet-20240229': 200K tokens (summarizes then uses Titan for embeddings)
         '--embedding_model': 'amazon.titan-embed-text-v1',
-        '--additional-python-modules': 'boto3>=1.34.0,requests,numpy',
+        '--additional-python-modules': 'boto3>=1.34.0,requests,numpy,Pillow',
       },
       maxRetries: 0,
       timeout: 60,
