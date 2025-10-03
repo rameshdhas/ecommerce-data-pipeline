@@ -15,7 +15,9 @@ def handler(event, context):
         # Only process CSV files
         if key.endswith('.csv'):
             try:
-                # Start Glue job
+                print(f"Processing file: {key}")
+
+                # Start Glue job with scalable configuration
                 response = glue_client.start_job_run(
                     JobName=glue_job_name,
                     Arguments={
@@ -23,7 +25,9 @@ def handler(event, context):
                         '--data_bucket': bucket
                     }
                 )
+
                 print(f"Started Glue job {response['JobRunId']} for {key}")
+
             except Exception as e:
                 print(f"Error starting Glue job: {str(e)}")
                 raise
