@@ -12,7 +12,9 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
     - Or use automatic chunking with embedding averaging
     """
     try:
+        print(f"DEBUG: Starting embedding generation for text length {len(text)}")
         aws_clients = get_aws_clients()
+        print(f"DEBUG: Got AWS clients successfully")
 
         # Claude models via Bedrock for text summarization + embedding
         # Claude doesn't generate embeddings directly, but can summarize long text
@@ -32,9 +34,11 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
 
         # Amazon Titan models
         elif model_id == "amazon.titan-embed-text-v1":
+            print(f"DEBUG: Using Titan v1 model for embedding")
             body = json.dumps({
                 "inputText": text
             })
+            print(f"DEBUG: Prepared request body")
 
             response = aws_clients.bedrock_client.invoke_model(
                 modelId=model_id,
@@ -42,9 +46,12 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
                 contentType='application/json',
                 accept='application/json'
             )
+            print(f"DEBUG: Got response from Bedrock")
 
             response_body = json.loads(response['body'].read())
-            return response_body['embedding']
+            embeddings = response_body['embedding']
+            print(f"DEBUG: Successfully extracted {len(embeddings)} embedding dimensions")
+            return embeddings
         else:
             # Default to Titan v2
             body = json.dumps({
@@ -65,10 +72,15 @@ def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1")
 
     except Exception as e:
         error_msg = str(e)
-        print(f"Error generating embeddings: {error_msg}")
+        print(f"ERROR generating embeddings: {error_msg}")
+        print(f"ERROR type: {type(e).__name__}")
         print(f"  - Model ID: {model_id}")
         print(f"  - Text length: {len(text)} characters")
         print(f"  - Text preview: {text[:100]}..." if len(text) > 100 else f"  - Text: {text}")
+
+        # Print full traceback for debugging
+        import traceback
+        print(f"ERROR traceback: {traceback.format_exc()}")
 
         # If model is invalid, try fallback to v1
         if "ValidationException" in error_msg and "invalid" in error_msg.lower():

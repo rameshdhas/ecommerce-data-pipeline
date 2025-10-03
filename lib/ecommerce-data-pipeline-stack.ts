@@ -51,7 +51,7 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // Scalable Glue job for processing CSV and generating vectors
+    // Simple Glue job for processing CSV and generating vectors
     const glueJob = new glue.CfnJob(this, 'DataProcessingJob', {
       name: 'ecommerce-data-processing',
       role: glueRole.roleArn,
@@ -69,17 +69,15 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
         '--elasticsearch_endpoint': 'elasticsearch_endpoint',
         '--elasticsearch_api_key': 'elasticsearch_api_key',
         '--embedding_model': 'amazon.titan-embed-text-v1',
-        '--batch_size': '100',            // Process in batches of 100 records
-        '--partition_size': '10000',       // Spark partition size
-        '--max_embedding_batch': '25',     // Bedrock batch limit
+        '--batch_size': '100',
         '--additional-python-modules': 'boto3>=1.34.0,requests,pandas==1.5.3,numpy==1.21.6',
         '--extra-py-files': `s3://${scriptsBucket.bucketName}/glue-jobs.zip`,
       },
       maxRetries: 1,
-      timeout: 180,  // 3 hours for large datasets
+      timeout: 180,
       glueVersion: '4.0',
-      numberOfWorkers: 10,   // Start with 10 workers for parallel processing
-      workerType: 'G.1X',    // Use memory-optimized workers
+      numberOfWorkers: 2,
+      workerType: 'G.1X',
     });
 
     // Lambda function to trigger Glue job on S3 upload

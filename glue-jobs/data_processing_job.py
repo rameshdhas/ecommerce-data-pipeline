@@ -1,4 +1,5 @@
 import sys
+import pandas as pd
 from datetime import datetime
 from awsglue.transforms import *
 from pyspark.context import SparkContext
@@ -13,11 +14,11 @@ import json
 from shared.config import get_job_arguments
 from shared.aws_clients import get_aws_clients
 from shared.utils import safe_float, safe_int
-from embedding.generator import generate_embeddings_batch
+from embedding.generator import generate_embeddings
 from processing.csv_reader import process_csv_data
 from processing.text_processor import create_text_content, extract_clean_description
-from storage.s3_writer import save_to_s3_batch
-from storage.elasticsearch_writer import save_to_elasticsearch_batch
+from storage.s3_writer import save_to_s3
+from storage.elasticsearch_writer import save_to_elasticsearch
 
 # Initialize Glue context
 sc = SparkContext()
@@ -57,217 +58,151 @@ def find_input_file(bucket_name: str) -> str:
         raise
 
 
-def create_processing_udf(embedding_model: str, batch_size: int):
-    """Create a UDF for processing batches of records"""
-
-    def process_batch_records(iterator):
-        """Process records in batches to optimize API calls"""
-        from embedding.generator import generate_embeddings_batch
-        from processing.text_processor import create_text_content, extract_clean_description
-        import json
-
-        batch = []
-        results = []
-
-        for row in iterator:
-            batch.append(row)
-
-            # Process when batch is full or at end of iterator
-            if len(batch) >= batch_size:
-                processed_batch = process_record_batch(batch, embedding_model)
-                results.extend(processed_batch)
-                batch = []
-
-        # Process remaining records
-        if batch:
-            processed_batch = process_record_batch(batch, embedding_model)
-            results.extend(processed_batch)
-
-        return iter(results)
-
-    return process_batch_records
 
 
-def process_record_batch(batch: List[Any], embedding_model: str) -> List[Dict]:
-    """Process a batch of records efficiently"""
-    processed_records = []
+def process_record(row_dict: Dict[str, Any], index: int, embedding_model: str) -> Dict[str, Any]:
+    """Process a single record and generate embeddings"""
+    # Create text content for embedding
+    text_content = create_text_content(row_dict)
 
-    # Extract text content for all records
-    text_contents = []
-    record_data = []
+    # Extract clean description
+    clean_description = extract_clean_description(row_dict)
 
-    for row in batch:
-        row_dict = row.asDict()
-        text_content = create_text_content(row_dict)
-        clean_description = extract_clean_description(row_dict)
+    # Generate embeddings if text content exists
+    embeddings = []
+    if text_content:
+        print(f"Processing record {index}: generating embeddings for {len(text_content)} chars")
+        embeddings = generate_embeddings(text_content, model_id=embedding_model)
+        print(f"Record {index}: got {len(embeddings)} embedding dimensions")
 
-        text_contents.append(text_content)
-        record_data.append({
-            'row_dict': row_dict,
-            'text_content': text_content,
-            'clean_description': clean_description
-        })
-
-    # Generate embeddings in batch (more efficient API usage)
-    try:
-        embeddings_batch = generate_embeddings_batch(text_contents, model_id=embedding_model)
-    except Exception as e:
-        print(f"Batch embedding generation failed: {e}")
-        embeddings_batch = [[] for _ in text_contents]  # Empty embeddings for all
-
-    # Create processed records
-    for i, record_info in enumerate(record_data):
-        row_dict = record_info['row_dict']
-        embeddings = embeddings_batch[i] if i < len(embeddings_batch) else []
-
-        # Convert timestamp to ISO format
-        timestamp_value = row_dict.get('timestamp', '')
-        if timestamp_value:
-            try:
-                timestamp_iso = datetime.fromisoformat(str(timestamp_value)).isoformat()
-            except:
-                timestamp_iso = datetime.now().isoformat()
-        else:
+    # Convert timestamp to ISO format for Elasticsearch
+    timestamp_value = row_dict.get('timestamp', '')
+    if timestamp_value:
+        try:
+            if isinstance(timestamp_value, str):
+                dt = pd.to_datetime(timestamp_value)
+                timestamp_iso = dt.isoformat()
+            else:
+                timestamp_iso = pd.to_datetime(timestamp_value).isoformat()
+        except Exception as e:
+            print(f"Warning: Could not parse timestamp '{timestamp_value}': {e}")
             timestamp_iso = datetime.now().isoformat()
+    else:
+        timestamp_iso = datetime.now().isoformat()
 
-        # Create metadata
-        metadata = {
-            "asin": row_dict.get('asin', ''),
-            "brand": row_dict.get('brand', ''),
-            "seller_name": row_dict.get('seller_name', ''),
-            "categories": row_dict.get('categories', ''),
-            "department": row_dict.get('department', ''),
-            "rating": safe_float(row_dict.get('rating', 0)),
-            "reviews_count": safe_int(row_dict.get('reviews_count', 0)),
-            "final_price": safe_float(row_dict.get('final_price', 0)),
-            "currency": row_dict.get('currency', 'USD'),
-            "availability": row_dict.get('availability', ''),
-            "discount": row_dict.get('discount', ''),
-            "is_available": row_dict.get('is_available', False),
-            "bought_past_month": safe_int(row_dict.get('bought_past_month', 0)),
-            "timestamp": timestamp_iso,
-        }
+    # Create metadata for filtering in vector search
+    metadata = {
+        "asin": row_dict.get('asin', ''),
+        "brand": row_dict.get('brand', ''),
+        "seller_name": row_dict.get('seller_name', ''),
+        "categories": row_dict.get('categories', ''),
+        "department": row_dict.get('department', ''),
+        "rating": safe_float(row_dict.get('rating', 0)),
+        "reviews_count": safe_int(row_dict.get('reviews_count', 0)),
+        "final_price": safe_float(row_dict.get('final_price', 0)),
+        "currency": row_dict.get('currency', 'USD'),
+        "availability": row_dict.get('availability', ''),
+        "discount": row_dict.get('discount', ''),
+        "is_available": row_dict.get('is_available', False),
+        "bought_past_month": safe_int(row_dict.get('bought_past_month', 0)),
+        "timestamp": timestamp_iso,
+    }
 
-        processed_record = {
-            "id": row_dict.get('asin', f"record_{i}"),
-            "title": row_dict.get('title', ''),
-            "description": record_info['clean_description'],
-            "url": row_dict.get('url', ''),
-            "image_url": row_dict.get('image_url', ''),
-            "text_content": record_info['text_content'],
-            "embeddings": embeddings,
-            "embedding_dimension": len(embeddings) if embeddings else 0,
-            "has_embeddings": bool(embeddings),
-            "metadata": metadata,
-            "original_data": row_dict
-        }
+    # Create processed record
+    processed_record = {
+        "id": row_dict.get('asin', f"record_{index}"),
+        "title": row_dict.get('title', ''),
+        "description": clean_description,
+        "url": row_dict.get('url', ''),
+        "image_url": row_dict.get('image_url', ''),
+        "text_content": text_content,
+        "embeddings": embeddings if embeddings else [],
+        "embedding_dimension": len(embeddings) if embeddings else 0,
+        "has_embeddings": bool(embeddings),
+        "metadata": metadata,
+        "original_data": row_dict
+    }
 
-        processed_records.append(processed_record)
-
-    return processed_records
-
-
-def save_partition_data(iterator, data_bucket: str, elasticsearch_endpoint: str, elasticsearch_api_key: str, embedding_model: str):
-    """Save data from a partition to S3 and Elasticsearch"""
-    records = list(iterator)
-    if not records:
-        return iter([])
-
-    # Save to S3 in batch
-    s3_success = save_to_s3_batch(records, data_bucket)
-
-    # Save to Elasticsearch in batch
-    es_success = save_to_elasticsearch_batch(
-        records,
-        elasticsearch_endpoint,
-        elasticsearch_api_key,
-        embedding_model
-    )
-
-    # Return processing results
-    results = []
-    for record in records:
-        results.append({
-            'record_id': record.get('id', ''),
-            's3_success': s3_success,
-            'es_success': es_success,
-            'has_embeddings': record.get('has_embeddings', False)
-        })
-
-    return iter(results)
+    return processed_record
 
 
 def main():
-    """Scalable main processing logic"""
+    """Simple sequential processing logic"""
+    # Check if input_path is provided
     input_path = args.get('input_path')
 
     if not input_path:
+        # If no input path provided, process all CSV files in the data bucket
         bucket_name = args['data_bucket']
-        print(f"Processing all CSV files in bucket: {bucket_name}")
+        print(f"No specific input path provided. Processing all CSV files in bucket: {bucket_name}")
         input_path = find_input_file(bucket_name)
     else:
-        print(f"Starting scalable data processing for: {input_path}")
+        print(f"Starting data processing job for: {input_path}")
 
+    # Read and process CSV data
+    df = process_csv_data(input_path, glueContext)
+
+    # Convert to Pandas for easier processing
+    pandas_df = df.toPandas()
+
+    processed_records = []
+
+    # Track statistics
+    successful_embeddings = 0
+    failed_embeddings = 0
+
+    # Get the embedding model to use (default to Titan v1 if not specified)
     embedding_model = args.get('embedding_model', 'amazon.titan-embed-text-v1')
     print(f"Using embedding model: {embedding_model} with batch size: {BATCH_SIZE}")
 
-    # Read CSV data using Glue's DynamicFrame for better performance
-    datasource = glueContext.create_dynamic_frame.from_options(
-        format_options={"multiline": False},
-        connection_type="s3",
-        format="csv",
-        connection_options={
-            "paths": [input_path],
-            "recurse": True
-        },
-        transformation_ctx="datasource"
-    )
+    # Process each row
+    for index, row in pandas_df.iterrows():
+        try:
+            processed_record = process_record(row.to_dict(), index, embedding_model)
 
-    # Convert to DataFrame for Spark operations
-    df = datasource.toDF()
+            # Track embedding success/failure
+            if processed_record['has_embeddings']:
+                successful_embeddings += 1
+            else:
+                failed_embeddings += 1
 
-    # Repartition for optimal processing (avoid too many small partitions)
-    total_rows = df.count()
-    optimal_partitions = max(1, min(total_rows // PARTITION_SIZE, 200))  # Cap at 200 partitions
-    df = df.repartition(optimal_partitions)
+            processed_records.append(processed_record)
 
-    print(f"Processing {total_rows} records across {optimal_partitions} partitions")
+            if (index + 1) % BATCH_SIZE == 0:
+                print(f"Processed {index + 1} records (Embeddings: {successful_embeddings} success, {failed_embeddings} failed)...")
 
-    # Process data using Spark's mapPartitions for scalability
-    processed_rdd = df.rdd.mapPartitions(
-        lambda iterator: create_processing_udf(embedding_model, BATCH_SIZE)(iterator)
-    )
+        except Exception as e:
+            print(f"Error processing row {index}: {str(e)}")
+            continue
 
-    # Save processed data using mapPartitions to handle large datasets
-    save_results_rdd = processed_rdd.mapPartitions(
-        lambda iterator: save_partition_data(
-            iterator,
-            args['data_bucket'],
+    print(f"Successfully processed {len(processed_records)} records")
+    print(f"Embeddings generated: {successful_embeddings} successful, {failed_embeddings} failed")
+
+    # Save to S3 and Elasticsearch
+    if processed_records:
+        # Save to S3
+        s3_success = save_to_s3(processed_records, args['data_bucket'])
+
+        # Save to Elasticsearch
+        es_success = save_to_elasticsearch(
+            processed_records,
             args.get('elasticsearch_endpoint', ''),
             args.get('elasticsearch_api_key', ''),
             embedding_model
         )
-    )
 
-    # Collect results to trigger execution
-    results = save_results_rdd.collect()
+        if s3_success and es_success:
+            print("Data successfully saved to both S3 and Elasticsearch")
+        elif s3_success:
+            print("Data saved to S3, but Elasticsearch indexing failed or was skipped")
+        else:
+            print("Warning: Failed to save data to storage systems")
 
-    # Calculate statistics
-    total_processed = len(results)
-    successful_embeddings = sum(1 for r in results if r.get('has_embeddings', False))
-    s3_successes = sum(1 for r in results if r.get('s3_success', False))
-    es_successes = sum(1 for r in results if r.get('es_success', False))
+        print(f"Processing complete. Records with embeddings: {successful_embeddings}/{len(processed_records)}")
+    else:
+        print("WARNING: No records were processed!")
 
-    print(f"Processing complete:")
-    print(f"  Total records processed: {total_processed}")
-    print(f"  Records with embeddings: {successful_embeddings}")
-    print(f"  S3 saves successful: {s3_successes}")
-    print(f"  Elasticsearch saves successful: {es_successes}")
-
-    # Log processing efficiency
-    if total_processed > 0:
-        embedding_rate = (successful_embeddings / total_processed) * 100
-        print(f"  Embedding success rate: {embedding_rate:.1f}%")
+    print("Data processing job completed successfully!")
 
 
 if __name__ == "__main__":
