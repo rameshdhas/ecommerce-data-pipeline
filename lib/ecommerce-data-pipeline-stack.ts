@@ -71,17 +71,6 @@ export class EcommerceDataPipelineStack extends cdk.Stack {
         '--data_bucket': dataBucket.bucketName,
         '--elasticsearch_endpoint': 'elasticsearch_endpoint',
         '--elasticsearch_api_key': 'elasticsearch_api_key',
-        // Amazon Bedrock Foundation Model options (no external API keys needed):
-        // Text Embeddings:
-        // - 'amazon.titan-embed-text-v2': 8192 tokens, 1024 dimensions (configurable 256/512/1024)
-        // - 'amazon.titan-embed-text-v1': 8192 tokens, 1536 dimensions
-        // - 'cohere.embed-english-v3': 512 tokens, 1024 dimensions
-        // - 'cohere.embed-multilingual-v3': 512 tokens, 1024 dimensions
-        // Multimodal Embeddings:
-        // - 'amazon.titan-embed-image-v1': Text + Image, 1024 dimensions
-        // Text Summarization (for long content):
-        // - 'anthropic.claude-3-haiku-20240307': 200K tokens (summarizes then uses Titan for embeddings)
-        // - 'anthropic.claude-3-sonnet-20240229': 200K tokens (summarizes then uses Titan for embeddings)
         '--embedding_model': 'amazon.titan-embed-text-v1',
         '--additional-python-modules': 'boto3>=1.34.0,requests,numpy,Pillow',
       },
