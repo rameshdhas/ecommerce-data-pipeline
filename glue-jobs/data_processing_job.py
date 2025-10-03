@@ -34,7 +34,7 @@ job.init(args['JOB_NAME'], args)
 aws_clients = get_aws_clients()
 
 # Configuration for scalable processing
-BATCH_SIZE = int(args.get('batch_size', 1000))  # Process in batches
+BATCH_SIZE = int(args.get('batch_size', 100))  # Process in batches
 PARTITION_SIZE = int(args.get('partition_size', 10000))  # Spark partition size
 MAX_EMBEDDING_BATCH = int(args.get('max_embedding_batch', 25))  # Bedrock batch limit
 
@@ -127,7 +127,7 @@ def process_record(row_dict: Dict[str, Any], index: int, embedding_model: str) -
 
 
 def main():
-    """Simple sequential processing logic"""
+    """Sequential processing with batch storage logic"""
     # Check if input_path is provided
     input_path = args.get('input_path')
 
@@ -145,15 +145,18 @@ def main():
     # Convert to Pandas for easier processing
     pandas_df = df.toPandas()
 
-    processed_records = []
-
     # Track statistics
     successful_embeddings = 0
     failed_embeddings = 0
+    total_processed = 0
 
     # Get the embedding model to use (default to Titan v1 if not specified)
     embedding_model = args.get('embedding_model', 'amazon.titan-embed-text-v1')
     print(f"Using embedding model: {embedding_model} with batch size: {BATCH_SIZE}")
+
+    # Process records in batches for memory efficiency
+    current_batch = []
+    batch_number = 1
 
     # Process each row
     for index, row in pandas_df.iterrows():
@@ -166,43 +169,65 @@ def main():
             else:
                 failed_embeddings += 1
 
-            processed_records.append(processed_record)
+            current_batch.append(processed_record)
+            total_processed += 1
 
-            if (index + 1) % BATCH_SIZE == 0:
-                print(f"Processed {index + 1} records (Embeddings: {successful_embeddings} success, {failed_embeddings} failed)...")
+            # Save batch when it reaches the batch size
+            if len(current_batch) >= BATCH_SIZE:
+                print(f"Processing batch {batch_number}: {len(current_batch)} records (Embeddings: {successful_embeddings} success, {failed_embeddings} failed so far)")
+
+                # Save current batch to storage
+                save_batch_to_storage(current_batch, batch_number, embedding_model)
+
+                # Clear batch and increment counter
+                current_batch = []
+                batch_number += 1
 
         except Exception as e:
             print(f"Error processing row {index}: {str(e)}")
             continue
 
-    print(f"Successfully processed {len(processed_records)} records")
+    # Save any remaining records in the final batch
+    if current_batch:
+        print(f"Processing final batch {batch_number}: {len(current_batch)} records")
+        save_batch_to_storage(current_batch, batch_number, embedding_model)
+
+    print(f"Successfully processed {total_processed} records in {batch_number} batches")
     print(f"Embeddings generated: {successful_embeddings} successful, {failed_embeddings} failed")
-
-    # Save to S3 and Elasticsearch
-    if processed_records:
-        # Save to S3
-        s3_success = save_to_s3(processed_records, args['data_bucket'])
-
-        # Save to Elasticsearch
-        es_success = save_to_elasticsearch(
-            processed_records,
-            args.get('elasticsearch_endpoint', ''),
-            args.get('elasticsearch_api_key', ''),
-            embedding_model
-        )
-
-        if s3_success and es_success:
-            print("Data successfully saved to both S3 and Elasticsearch")
-        elif s3_success:
-            print("Data saved to S3, but Elasticsearch indexing failed or was skipped")
-        else:
-            print("Warning: Failed to save data to storage systems")
-
-        print(f"Processing complete. Records with embeddings: {successful_embeddings}/{len(processed_records)}")
-    else:
-        print("WARNING: No records were processed!")
-
+    print(f"Processing complete. Records with embeddings: {successful_embeddings}/{total_processed}")
     print("Data processing job completed successfully!")
+
+
+def save_batch_to_storage(batch_records, batch_number, embedding_model):
+    """Save a batch of records to both S3 and Elasticsearch"""
+    if not batch_records:
+        return
+
+    from storage.s3_writer import save_to_s3_batch
+    from storage.elasticsearch_writer import save_to_elasticsearch_batch
+
+    print(f"Saving batch {batch_number} with {len(batch_records)} records to storage...")
+
+    # Save to S3 (batch method)
+    s3_success = save_to_s3_batch(batch_records, args['data_bucket'], str(batch_number))
+
+    # Save to Elasticsearch (batch method)
+    es_success = save_to_elasticsearch_batch(
+        batch_records,
+        args.get('elasticsearch_endpoint', ''),
+        args.get('elasticsearch_api_key', ''),
+        embedding_model
+    )
+
+    # Report batch results
+    records_with_embeddings = sum(1 for r in batch_records if r.get('has_embeddings', False))
+
+    if s3_success and es_success:
+        print(f"Batch {batch_number}: Successfully saved to both S3 and Elasticsearch ({records_with_embeddings}/{len(batch_records)} with embeddings)")
+    elif s3_success:
+        print(f"Batch {batch_number}: Saved to S3, but Elasticsearch indexing failed or was skipped ({records_with_embeddings}/{len(batch_records)} with embeddings)")
+    else:
+        print(f"Batch {batch_number}: Warning - Failed to save to storage systems ({records_with_embeddings}/{len(batch_records)} with embeddings)")
 
 
 if __name__ == "__main__":
