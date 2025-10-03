@@ -54,7 +54,6 @@ bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
 s3_client = boto3.client('s3')
 # Disable Rekognition for now - focusing on PIL-based color extraction which is more reliable
 print("Rekognition disabled - using PIL color extraction only")
-rekognition_client = None
 
 def safe_float(value, default=0.0):
     """Safely convert a value to float, handling quoted strings and nulls"""
