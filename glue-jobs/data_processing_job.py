@@ -17,8 +17,6 @@ from shared.utils import safe_float, safe_int
 from embedding.generator import generate_embeddings
 from processing.csv_reader import process_csv_data
 from processing.text_processor import create_text_content, extract_clean_description
-from storage.s3_writer import save_to_s3
-from storage.elasticsearch_writer import save_to_elasticsearch
 
 # Initialize Glue context
 sc = SparkContext()
@@ -35,9 +33,6 @@ aws_clients = get_aws_clients()
 
 # Configuration for scalable processing
 BATCH_SIZE = int(args.get('batch_size', 100))  # Process in batches
-PARTITION_SIZE = int(args.get('partition_size', 10000))  # Spark partition size
-MAX_EMBEDDING_BATCH = int(args.get('max_embedding_batch', 25))  # Bedrock batch limit
-
 
 def find_input_file(bucket_name: str) -> str:
     """Find the first CSV file in the bucket if no input path is specified"""
