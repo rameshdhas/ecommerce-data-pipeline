@@ -4,8 +4,6 @@ import pandas as pd
 import json
 import requests
 import os
-import base64
-import io
 from datetime import datetime
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
@@ -14,11 +12,7 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import DataFrame
-from typing import List, Dict, Any, Optional, Tuple
-from PIL import Image
-import numpy as np
-from urllib.parse import urlparse
-import colorsys
+from typing import List, Dict, Any, Optional
 
 # Initialize Glue context
 sc = SparkContext()
@@ -52,8 +46,8 @@ print(f"Data bucket: {args.get('data_bucket', 'NOT FOUND')}")
 bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
 # Use the default region for S3 operations
 s3_client = boto3.client('s3')
-# Disable Rekognition for now - focusing on PIL-based color extraction which is more reliable
-print("Rekognition disabled - using PIL color extraction only")
+# Simplified processing - text-only embeddings
+print("Image analysis disabled - using text-only processing")
 
 def safe_float(value, default=0.0):
     """Safely convert a value to float, handling quoted strings and nulls"""
@@ -79,255 +73,9 @@ def safe_int(value, default=0):
     except (ValueError, TypeError):
         return default
 
-def download_image_from_url(image_url: str, max_size: int = 5242880) -> Optional[bytes]:
-    """
-    Download image from URL with size limit (default 5MB)
-    """
-    try:
-        # Add headers to appear as a browser request
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-
-        response = requests.get(image_url, timeout=10, stream=True, headers=headers)
-        response.raise_for_status()
-
-        # Check if content type is an image
-        content_type = response.headers.get('content-type', '').lower()
-        if not any(img_type in content_type for img_type in ['image/', 'jpeg', 'jpg', 'png', 'gif', 'webp']):
-            print(f"Invalid content type for image URL: {content_type}")
-            return None
-
-        # Check content length
-        content_length = response.headers.get('content-length')
-        if content_length and int(content_length) > max_size:
-            print(f"Image too large: {content_length} bytes")
-            return None
-
-        image_data = response.content
-        if len(image_data) > max_size:
-            print(f"Image too large after download: {len(image_data)} bytes")
-            return None
-
-        # Validate that it's actually an image by checking magic bytes
-        if len(image_data) < 8:
-            print(f"Downloaded data too small to be an image: {len(image_data)} bytes")
-            return None
-
-        # Check for common image format signatures
-        is_valid_image = False
-        # JPEG
-        if image_data[:2] == b'\xff\xd8':
-            is_valid_image = True
-        # PNG
-        elif image_data[:8] == b'\x89\x50\x4e\x47\x0d\x0a\x1a\x0a':
-            is_valid_image = True
-        # GIF
-        elif image_data[:6] in [b'GIF87a', b'GIF89a']:
-            is_valid_image = True
-        # WebP
-        elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
-            is_valid_image = True
-        # BMP
-        elif image_data[:2] == b'BM':
-            is_valid_image = True
-
-        if not is_valid_image:
-            print(f"Downloaded data does not appear to be a valid image format")
-            # Print first few bytes for debugging
-            print(f"First 20 bytes: {image_data[:20] if len(image_data) >= 20 else image_data}")
-            return None
-
-        return image_data
-    except Exception as e:
-        print(f"Error downloading image from {image_url}: {str(e)}")
-        return None
-
-def analyze_image_with_rekognition(image_data: bytes) -> Dict[str, Any]:
-    """
-    Rekognition is disabled - return empty results
-    """
-    return {'labels': [], 'properties': []}
-
-def extract_dominant_colors_from_image(image_data: bytes, num_colors: int = 5) -> List[Dict[str, Any]]:
-    """
-    Extract dominant colors from image using PIL and clustering
-    """
-    try:
-        # Open image with PIL
-        image = Image.open(io.BytesIO(image_data))
-
-        # Convert to RGB if necessary
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-
-        # Resize for faster processing
-        image.thumbnail((150, 150))
-
-        # Get pixels
-        pixels = np.array(image).reshape(-1, 3)
-
-        # Simple color quantization using numpy
-        # Group similar colors
-        unique_colors, counts = np.unique(
-            pixels // 32 * 32,  # Quantize to reduce color space
-            axis=0,
-            return_counts=True
-        )
-
-        # Sort by frequency
-        sorted_indices = np.argsort(counts)[::-1][:num_colors]
-        dominant_colors = []
-
-        for idx in sorted_indices:
-            rgb = unique_colors[idx]
-            count = counts[idx]
-            percentage = (count / len(pixels)) * 100
-
-            # Convert RGB to color name
-            color_name = get_color_name(rgb[0], rgb[1], rgb[2])
-
-            dominant_colors.append({
-                'name': color_name,
-                'rgb': rgb.tolist(),
-                'hex': '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2]),
-                'percentage': round(percentage, 2)
-            })
-
-        return dominant_colors
-    except Exception as e:
-        print(f"Error extracting colors from image: {str(e)}")
-        return []
-
-def get_color_name(r: int, g: int, b: int) -> str:
-    """
-    Convert RGB values to a color name
-    """
-    # Normalize RGB values
-    r, g, b = r/255.0, g/255.0, b/255.0
-
-    # Convert to HSV
-    h, s, v = colorsys.rgb_to_hsv(r, g, b)
-    h = h * 360
-
-    # Determine color name based on HSV values
-    if s < 0.1:  # Low saturation - grayscale
-        if v < 0.3:
-            return "black"
-        elif v < 0.7:
-            return "gray"
-        else:
-            return "white"
-    elif v < 0.3:  # Low value - dark colors
-        return "dark"
-    else:  # Chromatic colors
-        if h < 15 or h >= 345:
-            return "red"
-        elif h < 45:
-            return "orange"
-        elif h < 75:
-            return "yellow"
-        elif h < 150:
-            return "green"
-        elif h < 210:
-            return "cyan"
-        elif h < 270:
-            return "blue"
-        elif h < 330:
-            return "purple"
-        else:
-            return "pink"
-
-def analyze_product_image(image_url: str) -> Dict[str, Any]:
-    """
-    Comprehensive image analysis including colors, objects, and visual features
-    """
-    analysis_result = {
-        'colors': [],
-        'objects': [],
-        'attributes': [],
-        'dominant_color': None,
-        'color_palette': [],
-        'visual_description': ''
-    }
-
-    if not image_url:
-        return analysis_result
-
-    try:
-        # Download image
-        image_data = download_image_from_url(image_url)
-        if not image_data:
-            print(f"Could not download image from: {image_url}")
-            return analysis_result
-
-        # Extract dominant colors using PIL (this doesn't require Rekognition)
-        try:
-            dominant_colors = extract_dominant_colors_from_image(image_data)
-            if dominant_colors:
-                analysis_result['colors'] = [color['name'] for color in dominant_colors]
-                analysis_result['dominant_color'] = dominant_colors[0]['name']
-                analysis_result['color_palette'] = dominant_colors
-        except Exception as e:
-            print(f"Error extracting colors with PIL: {str(e)}")
-
-        # Skip Rekognition - using PIL color extraction only
-        print(f"Successfully extracted colors using PIL: {analysis_result.get('dominant_color', 'none')}")
-
-        # Generate visual description using color data
-        desc_parts = []
-        if analysis_result['dominant_color']:
-            desc_parts.append(analysis_result['dominant_color'])
-        if analysis_result['colors'] and len(analysis_result['colors']) > 1:
-            # Add other colors if different from dominant
-            other_colors = [c for c in analysis_result['colors'][:3] if c != analysis_result['dominant_color']]
-            desc_parts.extend(other_colors)
-
-        analysis_result['visual_description'] = ' '.join(desc_parts)
-
-    except Exception as e:
-        print(f"Error in analyze_product_image: {str(e)}")
-        # Return partial results if we have color data
-        if analysis_result.get('dominant_color'):
-            print(f"Returning partial analysis with color data: {analysis_result['dominant_color']}")
-
-    return analysis_result
-
-def generate_multimodal_embeddings(text: str, image_analysis: Dict[str, Any], model_id: str = "amazon.titan-embed-text-v1") -> List[float]:
-    """
-    Generate embeddings that combine text and visual features
-    """
-    # Enrich text with visual features
-    enriched_text_parts = [text]
-
-    if image_analysis.get('dominant_color'):
-        enriched_text_parts.append(f"Color: {image_analysis['dominant_color']}")
-
-    if image_analysis.get('colors'):
-        enriched_text_parts.append(f"Colors: {', '.join(image_analysis['colors'][:3])}")
-
-    if image_analysis.get('objects'):
-        enriched_text_parts.append(f"Visual features: {', '.join(image_analysis['objects'][:5])}")
-
-    if image_analysis.get('attributes'):
-        enriched_text_parts.append(f"Attributes: {', '.join(image_analysis['attributes'][:3])}")
-
-    enriched_text = ' | '.join(enriched_text_parts)
-
-    # Generate embeddings with the enriched text
-    return generate_embeddings(enriched_text, model_id)
-
 def generate_embeddings(text: str, model_id: str = "amazon.titan-embed-text-v1") -> List[float]:
     """
     Generate vector embeddings using Amazon Bedrock foundation models.
-
-    Available Bedrock embedding models:
-    - amazon.titan-embed-text-v2: 8192 token limit, configurable 256/512/1024 dimensions
-    - amazon.titan-embed-text-v1: 8192 token limit, 1536 dimensions
-    - amazon.titan-embed-image-v1: For multimodal embeddings (1024 dimensions)
-    - cohere.embed-english-v3: 512 token limit, 1024 dimensions
-    - cohere.embed-multilingual-v3: 512 token limit, 1024 dimensions
-
     For long texts that exceed token limits:
     - Use Claude for intelligent summarization before embedding
     - Or use automatic chunking with embedding averaging
@@ -580,7 +328,7 @@ def process_csv_data(input_path: str) -> DataFrame:
         print(f"Error reading CSV: {str(e)}")
         raise
 
-def create_text_content(row: Dict[str, Any], image_analysis: Optional[Dict[str, Any]] = None) -> str:
+def create_text_content(row: Dict[str, Any]) -> str:
     """
     Create text content for embedding generation optimized for e-commerce semantic search
     """
@@ -655,16 +403,6 @@ def create_text_content(row: Dict[str, Any], image_analysis: Optional[Dict[str, 
     if 'final_price' in row and row['final_price']:
         text_parts.append(f"Price: {row['final_price']} {row.get('currency', 'USD')}")
 
-    # Add visual features from image analysis
-    if image_analysis:
-        if image_analysis.get('dominant_color'):
-            text_parts.append(f"Primary color: {image_analysis['dominant_color']}")
-
-        if image_analysis.get('colors'):
-            text_parts.append(f"Available colors: {', '.join(image_analysis['colors'][:3])}")
-
-        if image_analysis.get('visual_description'):
-            text_parts.append(f"Visual: {image_analysis['visual_description']}")
 
     return " | ".join(text_parts)
 
@@ -760,16 +498,6 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
                         "url": {"type": "text"},
                         "image_url": {"type": "text"},
                         "text_content": {"type": "text"},
-                        "image_analysis": {
-                            "properties": {
-                                "dominant_color": {"type": "keyword"},
-                                "colors": {"type": "keyword"},
-                                "color_palette": {"type": "object"},
-                                "objects": {"type": "keyword"},
-                                "attributes": {"type": "keyword"},
-                                "visual_description": {"type": "text"}
-                            }
-                        },
                         "embeddings": {
                             "type": "dense_vector",
                             "dims": embedding_dims,  # Dynamic dimensions based on model
@@ -834,7 +562,6 @@ def save_to_elasticsearch(processed_data: List[Dict[str, Any]]):
                     "url": record['url'],
                     "image_url": record['image_url'],
                     "text_content": record['text_content'],
-                    "image_analysis": record.get('image_analysis', {}),
                     "embeddings": record['embeddings'],
                     "metadata": record['metadata'],
                     "indexed_at": datetime.now().isoformat()
@@ -1031,36 +758,15 @@ def main():
     # Process each row
     for index, row in pandas_df.iterrows():
         try:
-            # Analyze product image if available
-            image_analysis = {}
-            image_url = row.get('image_url', '')
-
-            if image_url:
-                # Only print for every 10th product to reduce logs
-                if (index + 1) % 10 == 0:
-                    print(f"Analyzing images... Progress: {index + 1}/{len(pandas_df)}")
-
-                image_analysis = analyze_product_image(image_url)
-
-                # Only print details if we successfully extracted colors
-                if image_analysis.get('dominant_color'):
-                    if (index + 1) % 10 == 0:
-                        print(f"  - Sample product {index + 1}: Dominant color: {image_analysis['dominant_color']}")
-                        if image_analysis.get('objects'):
-                            print(f"  - Objects: {', '.join(image_analysis['objects'][:3])}")
-
-            # Create text content for embedding (now includes image analysis)
-            text_content = create_text_content(row.to_dict(), image_analysis)
+            # Create text content for embedding
+            text_content = create_text_content(row.to_dict())
 
             # Extract clean description
             clean_description = extract_clean_description(row.to_dict())
 
             if text_content:
-                # Generate multimodal embeddings combining text and visual features
-                if image_analysis and image_analysis.get('visual_description'):
-                    embeddings = generate_multimodal_embeddings(text_content, image_analysis, model_id=embedding_model)
-                else:
-                    embeddings = generate_embeddings(text_content, model_id=embedding_model)
+                # Generate embeddings using the specified model
+                embeddings = generate_embeddings(text_content, model_id=embedding_model)
 
                 # For now, continue even if embeddings fail (store record without embeddings)
                 # This allows us to at least save the processed metadata
@@ -1114,7 +820,6 @@ def main():
                         "url": row.get('url', ''),
                         "image_url": row.get('image_url', ''),
                         "text_content": text_content,
-                        "image_analysis": image_analysis,
                         "embeddings": embeddings if embeddings else [],
                         "embedding_dimension": len(embeddings) if embeddings else 0,
                         "has_embeddings": bool(embeddings),
